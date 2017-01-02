@@ -1,0 +1,262 @@
+{\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil\fcharset0 Courier New;}}
+{\colortbl ;\red255\green0\blue0;}
+{\*\generator Riched20 6.3.9600}\viewkind4\uc1 
+\pard\f0\fs22\lang1033 // NEMO5, The Nonelectrical simulation package.\par
+// Copyright (C) 2010 Purdue University\par
+// Authors (in alphabetical order):\par
+//\par
+// This package is a free software.\par
+// It is distributed under the NEMO5 Non-Commercial License (NNCL).\par
+// The license text is found in the subfolder 'license' in the top folder.\par
+// To request an official license document please write to the following address:\par
+// Purdue Research Foundation, 1281 Win Hentschel Blvd., West Lafayette, IN 47906, USA\par
+// $Id$\par
+\par
+//! Class: Compute potentials due to wavefunction pair products using Brute Force Method\par
+//! Full Configuration Interaction\par
+//! Author: Archana Tankasala atankas@purdue.edu\par
+\par
+#ifndef POTENTIALBFM\par
+#define POTENTIALBFM\par
+\par
+#include "Utility.h"\par
+\par
+using namespace Utilities;\par
+extern Parallelize P;\par
+extern Utility U;\par
+\par
+//! Brute Force Method potentials class\par
+class PotentialBFM \{\par
+ public:\par
+  //! Potentials due to pair products to save\par
+  dcmplx3d* pPairProductPotentials;\par
+  //! Potentials due to pair products computed without saving\par
+  std::vector<dcmplx> *pPairProductPotentialsVnq;\par
+  std::vector<dcmplx> *pPairProductPotentialsVnp;\par
+  std::vector<dcmplx> *pPairProductPotentialsVpq;\par
+\par
+  \par
+\par
+  //! Compute all potentials only once and save\par
+  void computePotentials(dcmplx3d &rPairProductsMatrix, double* atomCoordinates,\par
+\tab\tab\tab  uLongInt nAtoms, uShortInt nEffectiveWavefunctions,\par
+\tab\tab\tab  uShortInt wavefunctionStep, double epsilon, double ccRadius) \{\par
+    U.separator("computePotentials");\par
+    U.log(0)<<"\\nComputing all potentials to save in memory\\n";\par
+    U.activeMemory();\par
+    double startSavePotentials = MPI_Wtime();\par
+    centralCellR = ccRadius;\par
+    U.log(9)<<"Using central-cell correction dr = "<<centralCellR<<"\\n";\par
+    qr0 = r0au*q;\par
+    dielectricConstant = epsilon;\par
+    pPairProductPotentials = new dcmplx3d();\par
+    dcmplx3d &rPairProductPotentials = *pPairProductPotentials;\par
+   // if (P.mpiRank ==  0)\par
+    allocateMemory(rPairProductPotentials, \par
+\tab\tab    P.nAtomsPerProc, nEffectiveWavefunctions);\par
+    int numPotentials = 0;\par
+    for(int wfi=0;wfi<nEffectiveWavefunctions;wfi+=1)\{\par
+      for(int wfj=0;wfj<wfi+1;wfj+=1)\{\par
+\tab U.log(0)<<"\\tPotential for ("<<wfi*wavefunctionStep+1\par
+\tab\tab <<","<<wfj*wavefunctionStep+1<<")";\par
+\tab computePotential(rPairProductsMatrix[wfi][wfj], atomCoordinates,\par
+\tab\tab\tab  rPairProductPotentials[wfi][wfj], \par
+\tab\tab\tab  nAtoms, P.nAtomsPerProc, P.startAtom, P.endAtom);\par
+\tab numPotentials++;\par
+      \}\par
+    \}\par
+    U.log(9)<<"Computed potentials due to "<<numPotentials<<"\\n";\par
+    copyConjugates(rPairProductPotentials, P.startAtom, \par
+\tab\tab    P.endAtom, nEffectiveWavefunctions);\par
+    double endSavePotentials = MPI_Wtime();\par
+    U.log(0)<<"Finished computing potentials for "\par
+\tab     <<(nEffectiveWavefunctions*nEffectiveWavefunctions)\par
+\tab     <<" wavefunction pairproducts in "\par
+\tab     <<endSavePotentials-startSavePotentials<<"s.\\n";\par
+    U.activeMemory();\par
+    U.separator("computePotentials");\par
+  \}\par
+\par
+  //! Allocate memory for only 3 potential vectors\par
+  //! If potentials of all wavefunction pair products are not to be saved \par
+  void allocateDynamicPotentialVectors() \{\par
+    pPairProductPotentialsVnq = new std::vector<dcmplx> ();\par
+    pPairProductPotentialsVnp = new std::vector<dcmplx> ();\par
+    pPairProductPotentialsVpq = new std::vector<dcmplx> ();\par
+    pPairProductPotentialsVnq->resize(P.nAtomsPerProc);\par
+    pPairProductPotentialsVnp->resize(P.nAtomsPerProc);\par
+    pPairProductPotentialsVpq->resize(P.nAtomsPerProc);\par
+  \}\par
+\par
+  //! Compute potentials due to wavefunction pair products \par
+  \cf1\b void computePotential(std::vector<dcmplx> &rPairProduct, double* atomCoordinates,\par
+\tab\tab\tab std::vector<dcmplx> &rPairProductPotentials,\par
+\tab\tab\tab uLongInt nAtoms, uLongInt nAtomsPerProc, \par
+\tab\tab\tab uLongInt startAtom, uLongInt endAtom) \{\par
+\par
+    double potentialStart = MPI_Wtime();\par
+   int\tab flagEnd = 1;\par
+\tab int\tab flagContinue = 0;\par
+        int flagrcv =0;\par
+        MPI_Status status;\par
+        MPI_Comm comm;\par
+    double* coordinates; \par
+    double dr, dx, dy, dz;\par
+    double  s[3];\par
+   \par
+    dcmplx sum=0;\par
+    dcmplx num;\par
+    int rank;\par
+    int atomcount ;\par
+    \par
+    double dielectricCorrection = dielectricConstant;\par
+   \par
+ if (P.mpiRank == 0)\par
+    \{\par
+   coordinates= atomCoordinates;\par
+    atomcount =0; \par
+for (rank = 1; rank < P.mpiSize; ++rank) \par
+   \{                              // initial sent\par
+    MPI_Send(coordinates,\tab\tab // message buffer\par
+             3,\tab\tab\tab // one data item \par
+            MPI_DOUBLE,\tab\tab // data item is an integer \par
+             rank,\tab\tab // destination process rank\par
+             1,\tab\tab       // user chosen message tag \par
+             MPI_COMM_WORLD);\tab      // default communicator\par
+//MPI_Send(&atomcount, 1, MPI_INT, rank,2, MPI_COMM_WORLD);\par
+        (atomcount)++; \par
+\tab coordinates= coordinates+3;\par
+ \par
+        \par
+\tab\}\par
+\par
+while (flagEnd != 0 ) \par
+\tab\{\par
+\tab for (rank = 1; rank < P.mpiSize; ++rank) \par
+\tab\{\tab\tab\tab\tab\tab // check each processor for result\par
+\tab\tab MPI_Iprobe (rank, 11, MPI_COMM_WORLD, &flagContinue, &status);\par
+                \par
+\tab\tab if (flagContinue == 1)\par
+\tab\tab\{\par
+\tab\tab\tab\par
+\tab\tab\tab MPI_Recv(&num, 1, MPI_C_DOUBLE_COMPLEX, MPI_ANY_SOURCE,\par
+\tab\tab\tab\tab 11, MPI_COMM_WORLD, &status);\tab // row #\par
+\tab\tab\tab //printf("\\n the potential value is %lf + i %lf\\n", real (num), imag(num) );\par
+\tab\tab\tab\par
+\par
+\tab\tab        if (atomcount != nAtoms)\tab // assign row to the processor just became available\par
+\tab\tab\tab\{\par
+             MPI_Send(coordinates,\tab\tab // message buffer\par
+             3,\tab\tab\tab // one data item \par
+            MPI_DOUBLE,\tab\tab // data item is an integer \par
+            status.MPI_SOURCE,\tab\tab // destination process rank\par
+             1,\tab\tab // user chosen message tag \par
+             MPI_COMM_WORLD);\tab // default communicator\par
+      //MPI_Send(&atomcount, 1, MPI_INT, status.MPI_SOURCE,2, MPI_COMM_WORLD);\par
+        (atomcount) ++;\par
+\tab coordinates = coordinates+3;\par
+        \par
+\tab\tab\tab\}\par
+\tab\tab\tab\par
+\tab\tab\} \par
+\tab\tab if (atomcount == nAtoms-1)\tab\tab // termination condition\par
+\tab\tab\{\par
+\tab\tab\tab flagEnd = 0;\par
+\tab\tab\}\par
+\tab\}\par
+\tab\}\par
+  double potentialEnd = MPI_Wtime();\par
+    U.log(0)<<"\\n\\tCompleted in "<<potentialEnd-potentialStart<<"s.\\n";\par
+\par
+    \}\par
+//other ranks\par
+\par
+ \par
+ \par
+    while(1)\par
+\{  \par
+     \par
+    \par
+    MPI_Recv(&s, 3, MPI_DOUBLE, 0, 1,MPI_COMM_WORLD, &status);\par
+    //MPI_Recv(&atomcount, 1, MPI_INT, 0, 2,MPI_COMM_WORLD, &status);\par
+     \tab\par
+      for (uLongInt j=0; j<nAtoms; j++) \{\par
+\tab dx =  s[0] - atomCoordinates[3*j+0];\par
+\tab dy =  s[1] - atomCoordinates[3*j+1];\par
+\tab dz =  s[2] - atomCoordinates[3*j+2];\par
+\tab dr = std::sqrt(dx*dx + dy*dy + dz*dz);\par
+       \par
+\tab dielectricCorrection=getDielectric(dr);\par
+        \par
+\tab if(dr ==0)\par
+\tab   dr=centralCellR;\par
+\tab  \par
+     \par
+      \par
+\tab     sum  += rPairProduct[j]/(dielectricCorrection*dr);// probably here we need to put the "-" term\par
+ \par
+      \} // for end\par
+   \par
+ \par
+    MPI_Send(&sum, 1, MPI_C_DOUBLE_COMPLEX, 0, 11, MPI_COMM_WORLD);\par
+\} // while end\par
+    \par
+   // else end\par
+\par
+MPI_Finalize();\par
+\tab return;\par
+\}\par
+\par
+\cf0\b0  private:\par
+  static const double r0au = 4.28;\par
+  static const double q = 1.10;\par
+  static const double a0nm = 0.0529177208;\par
+  double qr0;\par
+  double dielectricConstant;\par
+  double centralCellR;\par
+\par
+  //! Allocate memory for 3-dimensional potential matriz\par
+  void allocateMemory(dcmplx3d &rPairProductPotentials, \par
+\tab\tab       uLongInt nAtomsPerProc, double nEffectiveWavefunctions) \{\par
+    rPairProductPotentials.resize(nEffectiveWavefunctions);\par
+    for (int i=0; i<nEffectiveWavefunctions; i++) \{\par
+      rPairProductPotentials[i].resize(nEffectiveWavefunctions);\par
+      for (int j=0; j<nEffectiveWavefunctions; j++)\par
+        rPairProductPotentials[i][j].resize(nAtomsPerProc);\par
+    \}\par
+    U.log(9)<<"Allocated memory for saving potentials due to all pair products\\n";\par
+    U.activeMemory();\par
+  \}\par
+\par
+  //! Copy conjugates of potentials\par
+  void copyConjugates(dcmplx3d &rPairProductPotentials, uLongInt startAtom, \par
+\tab\tab       uLongInt endAtom, double nEffectiveWavefunctions) \{\par
+    U.log(9)<<"Copying conjugates of potentials for remaining pair products\\n";\par
+    for(int wfi=0;wfi<nEffectiveWavefunctions;wfi+=1)\{\par
+      for(int wfj=wfi+1;wfj<nEffectiveWavefunctions;wfj+=1)\{\par
+        for(uLongInt i=startAtom;i<endAtom;i++)\par
+          rPairProductPotentials[wfi][wfj][i-startAtom] \par
+\tab     = std::conj(rPairProductPotentials[wfj][wfi][i-startAtom]); printf("checking: is the code coming here  wfi is %d and wfj is %d\\n",wfi,wfj);\par
+      \}\par
+    \}\par
+  \}\par
+\par
+  //! Get distance dependent dielectric constant\par
+  double getDielectric(double dr) \{\par
+    double dielectricCorrection = dielectricConstant;\par
+    double rAtomic = 0.0;\par
+    double argument = 0.0;\par
+    if (dr <= r0au*a0nm) \{\par
+      rAtomic=dr/a0nm;\par
+      argument=qr0-q*rAtomic;\par
+      dielectricCorrection=dielectricConstant*qr0/((q*rAtomic) + sinh(argument));\par
+    \}\par
+    return dielectricCorrection;\par
+  \}\par
+\par
+\};\par
+\par
+#endif\par
+\par
+}
+ 
